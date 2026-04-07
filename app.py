@@ -10,7 +10,7 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 import os
 from datetime import datetime
-from bookings import save_booking, load_all_bookings, get_todays_bookings
+from bookings import save_booking, load_all_bookings, get_todays_bookings, cancel_booking
 
 load_dotenv()
 app = Flask(__name__)
@@ -47,12 +47,7 @@ Step 6 - End with: Your booking is confirmed! See you then!
 CANCELLATION FLOW - when customer wants to cancel:
 Step 1 - Ask for their name
 Step 2 - Ask for the date and time of their booking
-Step 3 - Confirm the cancellation with: Your booking has been cancelled. We hope to see you another time!
-
-CANCELLATION FLOW - when customer wants to cancel:
-Step 1 - Ask for their name
-Step 2 - Ask for the date and time of their booking
-Step 3 - Confirm the cancellation with: Your booking has been cancelled. We hope to see you another time!
+Step 3 - Confirm with: Your booking has been cancelled. We hope to see you another time!
 
 IF YOU CANNOT HELP:
 - Say: I will pass this to our manager who will reply shortly
@@ -67,6 +62,29 @@ stats = {
     "escalations": 0,
     "conversations": {}
 }
+
+def extract_detail(conversation, detail_type):
+    try:
+        today = datetime.now().strftime("%A %d %B %Y")
+        prompts = {
+            "name": "From this WhatsApp conversation extract ONLY the customer name. Reply with just the name nothing else.",
+            "date": f"Today is {today}. From this WhatsApp conversation extract the booking date the customer mentioned. Convert it to this EXACT format: '9th April (Mon)'. If they said 'coming Monday' or 'next Monday' calculate the actual date. Reply with just the formatted date nothing else.",
+            "time": "From this WhatsApp conversation extract ONLY the booking time. Format it as '7:00 PM'. Reply with just the time nothing else.",
+            "party": "From this WhatsApp conversation extract ONLY the number of people. Reply with just the number nothing else."
+        }
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": prompts[detail_type]},
+                {"role": "user", "content": conversation}
+            ],
+            max_tokens=10
+        )
+        result = response.choices[0].message.content.strip()
+        result = result.replace('"', '').replace("'", '').strip()
+        return result if result else "Unknown"
+    except:
+        return "Unknown"
 
 def needs_escalation(message):
     triggers = [
@@ -106,20 +124,18 @@ def whatsapp_reply():
     if not customer_message:
         customer_message = "Hello"
 
+    # Count unique customers only
     if customer_number not in stats["conversations"] or len(stats["conversations"].get(customer_number, [])) == 0:
         stats["messages"] += 1
 
-    booking_keywords = ["i want to book", "book a table", "make a reservation", "reserve a table", "احجز طاولة", "حجز طاولة"]
-
-    
-
-
+    # Store for dashboard
     if customer_number not in stats["conversations"]:
         stats["conversations"][customer_number] = []
     stats["conversations"][customer_number].append({
         "role": "customer", "text": customer_message, "time": timestamp
     })
 
+    # Memory
     if customer_number not in conversation_history:
         conversation_history[customer_number] = []
 
@@ -131,10 +147,12 @@ def whatsapp_reply():
         conversation_history[customer_number] = \
             conversation_history[customer_number][-10:]
 
+    # Escalation
     if needs_escalation(customer_message):
         stats["escalations"] += 1
         alert_owner(customer_number, customer_message)
 
+    # Call Groq AI
     try:
         messages = [{"role": "system", "content": BUSINESS_PROMPT}]
         messages += conversation_history[customer_number]
@@ -154,33 +172,50 @@ def whatsapp_reply():
             "role": "ai", "text": ai_reply, "time": timestamp
         })
 
-        # Booking counter goes up when AI confirms booking
+        # Booking confirmed — save with real details
         confirmation_keywords = [
-            "booking is confirmed", "reservation is confirmed",
-            "see you then", "booking confirmed",
-            "تم تأكيد", "حجزك مؤكد", "نراكم قريباً"
+            "your booking is confirmed",
+            "booking is confirmed",
+            "see you then",
+            "see you soon",
+            "تم تأكيد حجزك",
+            "حجزك مؤكد"
         ]
         if any(kw.lower() in ai_reply.lower() for kw in confirmation_keywords):
-            stats["bookings"] += 1
-            save_booking(
-                name="Guest",
-                phone=customer_number,
-                date="",
-                time="",
-                party_size=""
-            )
-            print("Booking confirmed and saved!")
+            # Build full conversation text for extraction
+            full_convo = "\n".join([
+                f"{'Customer' if m['role'] == 'user' else 'AI'}: {m['content']}"
+                for m in conversation_history[customer_number]
+            ])
+            name = extract_detail(full_convo, "name")
+            date = extract_detail(full_convo, "date")
+            time = extract_detail(full_convo, "time")
+            party = extract_detail(full_convo, "party")
 
-        # Booking counter goes down only when AI confirms cancellation
-        cancellation_confirmed = [
-            "cancellation is confirmed", "booking has been cancelled",
-            "successfully cancelled", "booking cancelled",
-            "reservation cancelled", "تم الالغاء", "تم إلغاء الحجز"
+            print(f"Extracted — Name: {name} | Date: {date} | Time: {time} | Party: {party}")
+
+            save_booking(
+                name=name,
+                phone=customer_number,
+                date=date,
+                time=time,
+                party_size=party
+            )
+            stats["bookings"] += 1
+            print("Booking confirmed and saved with real details!")
+
+        # Cancellation confirmed
+        cancellation_keywords = [
+            "booking has been cancelled",
+            "reservation has been cancelled",
+            "successfully cancelled",
+            "تم إلغاء الحجز"
         ]
-        if any(kw.lower() in ai_reply.lower() for kw in cancellation_confirmed):
+        if any(kw.lower() in ai_reply.lower() for kw in cancellation_keywords):
             if stats["bookings"] > 0:
                 stats["bookings"] -= 1
-            print("Booking cancelled and counter updated!")
+            cancel_booking(customer_number)
+            print("Booking cancelled!")
 
     except Exception as e:
         print(f"Groq error: {e}")
@@ -217,13 +252,17 @@ def dashboard():
                     margin-bottom:12px; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
             .card h2 { font-size:15px; color:#333; margin-bottom:12px;
                        border-bottom:2px solid #25D366; padding-bottom:8px; }
-            .message { padding:8px 12px; border-radius:8px; margin:6px 0; font-size:13px; }
+            .message { padding:8px 12px; border-radius:8px; margin:6px 0;
+                       font-size:13px; }
             .customer-msg { background:#f0f0f0; border-left:3px solid #666; }
             .ai-msg { background:#e8f8f0; border-left:3px solid #25D366; }
             .convo-header { font-size:11px; color:#999; margin-top:10px;
                             margin-bottom:4px; font-weight:bold; }
             .status { background:#e8f8f0; color:#25D366; padding:8px 12px;
                       border-radius:8px; font-size:13px; font-weight:bold; }
+            table { width:100%; border-collapse:collapse; font-size:13px; }
+            td { padding:8px; border-bottom:1px solid #eee; }
+            th { padding:8px; background:#f4f4f4; font-weight:bold; text-align:left; }
         </style>
         <meta http-equiv="refresh" content="10">
     </head>
@@ -235,7 +274,7 @@ def dashboard():
         <div class="stats">
             <div class="stat-card">
                 <div class="stat-number">{{ messages }}</div>
-                <div class="stat-label">Customers Reached</div>
+                <div class="stat-label">Customers</div>
             </div>
             <div class="stat-card">
                 <div class="stat-number">{{ bookings }}</div>
@@ -253,12 +292,38 @@ def dashboard():
         <div class="card">
             <h2>All Bookings</h2>
             {% if all_bookings %}
+            <table>
+                <tr>
+                    <th>Name</th>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>People</th>
+                    <th>Status</th>
+                </tr>
                 {% for b in all_bookings %}
-                <div class="message customer-msg">
-                    <b>{{ b.name }}</b> — {{ b.date }} at {{ b.time }}
-                    ({{ b.party_size }} people) | {{ b.created_at }}
-                </div>
+                <tr>
+                    <td>{{ b.name }}</td>
+                    <td>{{ b.date }}</td>
+                    <td>{{ b.time }}</td>
+                    <td>{{ b.party_size }}</td>
+                    <td>
+                        {% if b.status == "Active" %}
+                            <span style="background:#e8f8f0;color:#25D366;
+                                padding:3px 8px;border-radius:10px;
+                                font-weight:bold;font-size:11px;">
+                                Active
+                            </span>
+                        {% else %}
+                            <span style="background:#fdecea;color:#c0392b;
+                                padding:3px 8px;border-radius:10px;
+                                font-weight:bold;font-size:11px;">
+                                Cancelled
+                            </span>
+                        {% endif %}
+                    </td>
+                </tr>
                 {% endfor %}
+            </table>
             {% else %}
                 <p style="color:#999;font-size:13px;">No bookings yet.</p>
             {% endif %}
