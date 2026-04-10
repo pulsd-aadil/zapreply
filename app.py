@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 import os
 import json
 from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 from bookings import save_booking, load_all_bookings, get_todays_bookings, cancel_booking, update_booking, count_todays_bookings
 
 load_dotenv()
@@ -94,6 +95,86 @@ def save_stats():
         }, f)
 
 stats = load_stats()
+
+# Start background scheduler for reminders and daily report
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+def send_whatsapp(to_number, message):
+    """Send a WhatsApp message to any number"""
+    try:
+        client = Client(
+            os.getenv("TWILIO_ACCOUNT_SID"),
+            os.getenv("TWILIO_AUTH_TOKEN")
+        )
+        client.messages.create(
+            from_="whatsapp:+14155238886",
+            to=f"whatsapp:{to_number}",
+            body=message
+        )
+        print(f"Message sent to {to_number}")
+    except Exception as e:
+        print(f"Send failed: {e}")
+
+def send_appointment_reminders():
+    """Check bookings and send reminders 1hr before"""
+    try:
+        now = datetime.now()
+        current_time = now.strftime("%I:%M %p").lstrip("0")
+        all_bookings = load_all_bookings()
+        for booking in all_bookings:
+            if booking["status"] != "Active":
+                continue
+            # Check if booking is in ~1 hour
+            booking_time = booking.get("time", "")
+            booking_date = booking.get("date", "")
+            today_str = now.strftime("%d %b %y")
+            if today_str.lower() in booking_date.lower():
+                try:
+                    from datetime import timedelta
+                    booking_dt = datetime.strptime(
+                        f"{now.strftime('%Y-%m-%d')} {booking_time}",
+                        "%Y-%m-%d %I:%M %p"
+                    )
+                    diff = (booking_dt - now).total_seconds() / 60
+                    if 55 <= diff <= 65:  # Within 1 hour window
+                        reminder = (
+                            f"Hi {booking['name']}! 🔔 Reminder: "
+                            f"Your table at Tasty Bites is booked for today at {booking_time}. "
+                            f"We look forward to seeing you!"
+                        )
+                        send_whatsapp(booking["phone"].replace("whatsapp:", ""), reminder)
+                        print(f"Reminder sent to {booking['name']}")
+                except Exception as e:
+                    print(f"Reminder error: {e}")
+    except Exception as e:
+        print(f"Scheduler error: {e}")
+
+def send_daily_report():
+    """Send daily summary to owner at 8pm"""
+    try:
+        owner = os.getenv("OWNER_WHATSAPP")
+        today_bookings = get_todays_bookings()
+        total = load_all_bookings()
+        report = (
+            f"📊 Daily Report — {datetime.now().strftime('%d %b %Y')}\n"
+            f"─────────────────────\n"
+            f"👥 Customers reached: {stats['messages']}\n"
+            f"✅ Today's bookings: {len(today_bookings)}\n"
+            f"📅 Total bookings: {stats['bookings']}\n"
+            f"⚠️  Escalations: {stats['escalations']}\n"
+            f"\nYour AI worked all day so you didn't have to! 🤖"
+        )
+        send_whatsapp(owner, report)
+        print("Daily report sent to owner!")
+    except Exception as e:
+        print(f"Daily report error: {e}")
+
+# Schedule reminder check every minute
+scheduler.add_job(send_appointment_reminders, 'interval', minutes=1)
+
+# Schedule daily report at 8pm every day
+scheduler.add_job(send_daily_report, 'cron', hour=20, minute=0)
 
 def ordinal(n):
     """Convert number to ordinal string: 1 -> 1st, 2 -> 2nd etc"""
@@ -401,12 +482,50 @@ def dashboard():
         
         <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
         <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     </head>
     <body>
         <div class="header">
             <h1>ZapReply Dashboard</h1>
             <p>Tasty Bites — Powered by Groq AI</p>
         </div>
+
+        <!-- TAB NAVIGATION -->
+        <div style="display:flex;gap:8px;margin-bottom:16px;overflow-x:auto;">
+            <button onclick="showTab('overview')" id="tab-overview"
+                style="padding:10px 20px;border:none;border-radius:8px;
+                       background:#25D366;color:white;font-weight:bold;
+                       font-size:13px;cursor:pointer;white-space:nowrap;">
+                Overview
+            </button>
+            <button onclick="showTab('bookings')" id="tab-bookings"
+                style="padding:10px 20px;border:none;border-radius:8px;
+                       background:white;color:#333;font-weight:bold;
+                       font-size:13px;cursor:pointer;white-space:nowrap;">
+                All Bookings
+            </button>
+            <button onclick="showTab('inbox')" id="tab-inbox"
+                style="padding:10px 20px;border:none;border-radius:8px;
+                       background:white;color:#333;font-weight:bold;
+                       font-size:13px;cursor:pointer;white-space:nowrap;">
+                Inbox
+            </button>
+            <button onclick="showTab('analytics')" id="tab-analytics"
+                style="padding:10px 20px;border:none;border-radius:8px;
+                       background:white;color:#333;font-weight:bold;
+                       font-size:13px;cursor:pointer;white-space:nowrap;">
+                Analytics
+            </button>
+            <button onclick="showTab('settings')" id="tab-settings"
+                style="padding:10px 20px;border:none;border-radius:8px;
+                       background:white;color:#333;font-weight:bold;
+                       font-size:13px;cursor:pointer;white-space:nowrap;">
+                Settings
+            </button>
+        </div>
+
+        <!-- OVERVIEW TAB -->
+        <div id="section-overview">
         <div class="stats">
             <div class="stat-card">
                 <div class="stat-number">{{ messages }}</div>
@@ -429,6 +548,11 @@ def dashboard():
             <h2>System Status</h2>
             <div class="status">AI Online — Groq Llama 3.3</div>
         </div>
+        </div>
+        <!-- END OVERVIEW TAB -->
+
+        <!-- BOOKINGS TAB -->
+        <div id="section-bookings" style="display:none;">
         <div class="card">
             <h2>All Bookings</h2>
 
@@ -572,6 +696,155 @@ def dashboard():
         </div>
 
        <script>
+        // Bookings Chart Data
+        var bookingDates = [];
+        var bookingCounts = {};
+
+        {% for b in all_bookings %}
+        (function() {
+            var d = "{{ b.date }}".split(" ").slice(0,3).join(" ");
+            if (!bookingCounts[d]) bookingCounts[d] = 0;
+            bookingCounts[d]++;
+        })();
+        {% endfor %}
+
+        var sortedDates = Object.keys(bookingCounts).slice(-7);
+        var sortedCounts = sortedDates.map(function(d) { return bookingCounts[d]; });
+
+        var ctx = document.getElementById('bookingsChart');
+        if (ctx) {
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: sortedDates.length > 0 ? sortedDates : ['No data yet'],
+                    datasets: [{
+                        label: 'Bookings',
+                        data: sortedCounts.length > 0 ? sortedCounts : [0],
+                        backgroundColor: [
+                            '#25D366','#0f3460','#e67e22',
+                            '#8e44ad','#c0392b','#2980b9','#27ae60'
+                        ],
+                        borderRadius: 8,
+                        borderSkipped: false,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(c) {
+                                    return c.parsed.y + ' booking' + (c.parsed.y !== 1 ? 's' : '');
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: { stepSize: 1 },
+                            grid: { color: '#f0f0f0' }
+                        },
+                        x: {
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+window.addEventListener('load', function() {
+            var pieCtx = document.getElementById('statusPieChart');
+            if (pieCtx) {
+                var activeCount = {{ all_bookings|selectattr("status","eq","Active")|list|length }};
+                var cancelledCount = {{ all_bookings|selectattr("status","eq","Cancelled")|list|length }};
+                var totalCount = activeCount + cancelledCount;
+
+                var pieChart = new Chart(pieCtx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['Active', 'Cancelled'],
+                        datasets: [{
+                            data: [activeCount, cancelledCount],
+                            backgroundColor: ['#25D366', '#c0392b'],
+                            borderWidth: 3,
+                            borderColor: '#fff',
+                            hoverOffset: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        cutout: '65%',
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(c) {
+                                        var pct = totalCount > 0 ?
+                                            Math.round(c.parsed / totalCount * 100) : 0;
+                                        return c.label + ': ' + c.parsed + ' (' + pct + '%)';
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    plugins: [{
+                        id: 'centerText',
+                        afterDraw: function(chart) {
+                            var ctx = chart.ctx;
+                            var cx = chart.chartArea.left +
+                                (chart.chartArea.right - chart.chartArea.left) / 2;
+                            var cy = chart.chartArea.top +
+                                (chart.chartArea.bottom - chart.chartArea.top) / 2;
+                            var activePct = totalCount > 0 ?
+                                Math.round(activeCount / totalCount * 100) : 0;
+                            ctx.save();
+                            ctx.font = 'bold 22px Arial';
+                            ctx.fillStyle = '#25D366';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(activePct + '%', cx, cy - 8);
+                            ctx.font = '11px Arial';
+                            ctx.fillStyle = '#999';
+                            ctx.fillText('Active', cx, cy + 12);
+                            ctx.restore();
+                        }
+                    }]
+                });
+            }
+        });
+        function showTab(tab) {
+            // Hide all sections
+            var sections = ['overview', 'bookings', 'inbox', 'analytics', 'settings'];
+            sections.forEach(function(s) {
+                var el = document.getElementById('section-' + s);
+                if (el) el.style.display = 'none';
+                var btn = document.getElementById('tab-' + s);
+                if (btn) {
+                    btn.style.background = 'white';
+                    btn.style.color = '#333';
+                }
+            });
+            // Hide overview convos if not overview
+            var overviewConvos = document.getElementById('section-overview-convos');
+            if (overviewConvos) {
+                overviewConvos.style.display = tab === 'overview' ? 'block' : 'none';
+            }
+            // Show selected
+            var selected = document.getElementById('section-' + tab);
+            if (selected) selected.style.display = 'block';
+            var selectedBtn = document.getElementById('tab-' + tab);
+            if (selectedBtn) {
+                selectedBtn.style.background = '#25D366';
+                selectedBtn.style.color = 'white';
+            }
+        }
+
+        function toggleConvo(id) {
+            var el = document.getElementById(id);
+            el.style.display = el.style.display === 'none' ? 'block' : 'none';
+        }
+
         flatpickr("#filterDate", {
             dateFormat: "d M y",
             allowInput: false,
@@ -643,6 +916,467 @@ def dashboard():
                 visibleCount === 0 ? "block" : "none";
         }
         </script>
+        </div>
+        <!-- END BOOKINGS TAB -->
+
+        <!-- INBOX TAB -->
+        <div id="section-inbox" style="display:none;">
+        <div class="card">
+            <h2>Conversations Inbox</h2>
+            {% if conversations %}
+                {% for number, messages in conversations.items() %}
+                <div style="border:1px solid #eee;border-radius:8px;
+                            margin-bottom:10px;overflow:hidden;">
+                    <div style="background:#f4f4f4;padding:10px 14px;
+                                display:flex;justify-content:space-between;
+                                align-items:center;cursor:pointer;"
+                         onclick="toggleConvo('convo-{{ loop.index }}')">
+                        <div>
+                            <b style="font-size:13px;">Customer</b>
+                            <span style="font-size:11px;color:#999;margin-left:8px;">
+                                {{ number }}
+                            </span>
+                        </div>
+                        <span style="font-size:11px;color:#25D366;">
+                            {{ messages|length }} messages ▼
+                        </span>
+                    </div>
+                    <div id="convo-{{ loop.index }}" style="display:none;padding:10px;">
+                        {% for msg in messages %}
+                        <div class="message {{ 'ai-msg' if msg.role == 'ai' else 'customer-msg' }}"
+                             style="margin:4px 0;">
+                            <b>{{ 'AI' if msg.role == 'ai' else 'Customer' }}</b>
+                            [{{ msg.time }}]: {{ msg.text }}
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p style="color:#999;font-size:13px;">No conversations yet.</p>
+            {% endif %}
+        </div>
+        </div>
+        <!-- END INBOX TAB -->
+
+        <!-- ANALYTICS TAB -->
+        <div id="section-analytics" style="display:none;">
+
+        <!-- KPI CARDS -->
+        <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px;">
+            <div style="background:white;padding:14px;border-radius:10px;
+                        box-shadow:0 2px 4px rgba(0,0,0,0.1);text-align:center;
+                        border-top:4px solid #25D366;">
+                <div style="font-size:26px;font-weight:bold;color:#25D366;">{{ bookings }}</div>
+                <div style="font-size:11px;color:#666;margin-top:4px;">Total Bookings</div>
+            </div>
+            <div style="background:white;padding:14px;border-radius:10px;
+                        box-shadow:0 2px 4px rgba(0,0,0,0.1);text-align:center;
+                        border-top:4px solid #0f3460;">
+                <div style="font-size:26px;font-weight:bold;color:#0f3460;">{{ messages }}</div>
+                <div style="font-size:11px;color:#666;margin-top:4px;">Customers Reached</div>
+            </div>
+            <div style="background:white;padding:14px;border-radius:10px;
+                        box-shadow:0 2px 4px rgba(0,0,0,0.1);text-align:center;
+                        border-top:4px solid #e67e22;">
+                <div style="font-size:26px;font-weight:bold;color:#e67e22;">{{ todays_bookings }}</div>
+                <div style="font-size:11px;color:#666;margin-top:4px;">Today's Bookings</div>
+            </div>
+            <div style="background:white;padding:14px;border-radius:10px;
+                        box-shadow:0 2px 4px rgba(0,0,0,0.1);text-align:center;
+                        border-top:4px solid #c0392b;">
+                <div style="font-size:26px;font-weight:bold;color:#c0392b;">{{ escalations }}</div>
+                <div style="font-size:11px;color:#666;margin-top:4px;">Escalations</div>
+            </div>
+        </div>
+
+        <!-- BOOKING CONVERSION RATE -->
+        <div class="card">
+            <h2>Booking Conversion Rate</h2>
+            {% if messages > 0 %}
+            {% set rate = (bookings / messages * 100)|round|int %}
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;">
+                <div style="font-size:32px;font-weight:bold;color:#25D366;">{{ rate }}%</div>
+                <div style="font-size:12px;color:#666;">
+                    {{ bookings }} out of {{ messages }} customers made a booking
+                </div>
+            </div>
+            <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:16px;">
+                <div style="background:linear-gradient(90deg,#25D366,#0f3460);
+                            height:100%;width:{{ [rate,100]|min }}%;
+                            border-radius:20px;transition:width 1s;">
+                </div>
+            </div>
+            {% else %}
+            <p style="color:#999;font-size:13px;">No data yet — send some messages first!</p>
+            {% endif %}
+        </div>
+
+        <!-- BOOKINGS BY STATUS BAR CHART -->
+        <div class="card">
+            <h2>Bookings by Status</h2>
+            {% set active_count = all_bookings|selectattr("status","eq","Active")|list|length %}
+            {% set cancelled_count = all_bookings|selectattr("status","eq","Cancelled")|list|length %}
+            {% set total_count = all_bookings|length %}
+
+            <div style="margin-bottom:12px;">
+                <div style="display:flex;justify-content:space-between;
+                            font-size:12px;margin-bottom:4px;">
+                    <span style="color:#25D366;font-weight:bold;">Active</span>
+                    <span>{{ active_count }}</span>
+                </div>
+                <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:20px;">
+                    {% if total_count > 0 %}
+                    <div style="background:#25D366;height:100%;
+                                width:{{ (active_count/total_count*100)|round|int }}%;
+                                border-radius:20px;">
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            <div>
+                <div style="display:flex;justify-content:space-between;
+                            font-size:12px;margin-bottom:4px;">
+                    <span style="color:#c0392b;font-weight:bold;">Cancelled</span>
+                    <span>{{ cancelled_count }}</span>
+                </div>
+                <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:20px;">
+                    {% if total_count > 0 %}
+                    <div style="background:#c0392b;height:100%;
+                                width:{{ (cancelled_count/total_count*100)|round|int }}%;
+                                border-radius:20px;">
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- BOOKINGS BY TIME SLOT -->
+        <div class="card">
+            <h2>Popular Booking Times</h2>
+            {% set time_slots = {} %}
+            {% for b in all_bookings %}
+                {% if b.time %}
+                    {% if b.time in time_slots %}
+                        {% set _ = time_slots.update({b.time: time_slots[b.time] + 1}) %}
+                    {% else %}
+                        {% set _ = time_slots.update({b.time: 1}) %}
+                    {% endif %}
+                {% endif %}
+            {% endfor %}
+            {% if time_slots %}
+                {% set max_val = time_slots.values()|max %}
+                {% for time, count in time_slots.items() %}
+                <div style="margin-bottom:10px;">
+                    <div style="display:flex;justify-content:space-between;
+                                font-size:12px;margin-bottom:4px;">
+                        <span style="font-weight:bold;">{{ time }}</span>
+                        <span>{{ count }} booking{{ 's' if count > 1 else '' }}</span>
+                    </div>
+                    <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:16px;">
+                        <div style="background:linear-gradient(90deg,#25D366,#0f3460);
+                                    height:100%;
+                                    width:{{ (count/max_val*100)|round|int }}%;
+                                    border-radius:20px;">
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p style="color:#999;font-size:13px;">No bookings yet.</p>
+            {% endif %}
+        </div>
+
+        <!-- AI PERFORMANCE -->
+        <div class="card">
+            <h2>AI Performance</h2>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+                <div style="display:flex;justify-content:space-between;
+                            padding:10px;background:#e8f8f0;border-radius:8px;">
+                    <span style="font-size:13px;">Messages Handled by AI</span>
+                    <span style="font-weight:bold;color:#25D366;">100%</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;
+                            padding:10px;background:#f4f4f4;border-radius:8px;">
+                    <span style="font-size:13px;">Escalations to Owner</span>
+                    <span style="font-weight:bold;color:#c0392b;">{{ escalations }}</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;
+                            padding:10px;background:#eaf0ff;border-radius:8px;">
+                    <span style="font-size:13px;">Languages Supported</span>
+                    <span style="font-weight:bold;color:#0f3460;">Arabic + English</span>
+                </div>
+                <div style="display:flex;justify-content:space-between;
+                            padding:10px;background:#fff4e6;border-radius:8px;">
+                    <span style="font-size:13px;">Availability</span>
+                    <span style="font-weight:bold;color:#e67e22;">24/7</span>
+                </div>
+            </div>
+        </div>
+
+        </div>
+        <!-- END ANALYTICS TAB -->
+
+        <!-- SETTINGS TAB -->
+        <div id="section-settings" style="display:none;">
+        <div class="card">
+            <h2>Settings</h2>
+            <div style="display:flex;flex-direction:column;gap:12px;">
+                <div>
+                    <label style="font-size:12px;color:#666;font-weight:bold;">
+                        Business Name
+                    </label>
+                    <input type="text" value="Tasty Bites Restaurant"
+                        style="width:100%;padding:8px 12px;border:1px solid #ddd;
+                               border-radius:8px;font-size:13px;margin-top:4px;">
+                </div>
+                <div>
+                    <label style="font-size:12px;color:#666;font-weight:bold;">
+                        Opening Hours
+                    </label>
+                    <input type="text" value="12pm to 11pm daily"
+                        style="width:100%;padding:8px 12px;border:1px solid #ddd;
+                               border-radius:8px;font-size:13px;margin-top:4px;">
+                </div>
+                <div>
+                    <label style="font-size:12px;color:#666;font-weight:bold;">
+                        Location
+                    </label>
+                    <input type="text" value="Khalidiyah Mall area, Abu Dhabi"
+                        style="width:100%;padding:8px 12px;border:1px solid #ddd;
+                               border-radius:8px;font-size:13px;margin-top:4px;">
+                </div>
+                <div>
+                    <label style="font-size:12px;color:#666;font-weight:bold;">
+                        Owner WhatsApp
+                    </label>
+                    <input type="text" placeholder="+971XXXXXXXXX"
+                        style="width:100%;padding:8px 12px;border:1px solid #ddd;
+                               border-radius:8px;font-size:13px;margin-top:4px;">
+                </div>
+                <div>
+                    <label style="font-size:12px;color:#666;font-weight:bold;">
+                        AI Tone
+                    </label>
+                    <select style="width:100%;padding:8px 12px;border:1px solid #ddd;
+                                   border-radius:8px;font-size:13px;margin-top:4px;">
+                        <option>Friendly and warm</option>
+                        <option>Professional and formal</option>
+                        <option>Fun and casual</option>
+                    </select>
+                </div>
+                <button style="padding:12px;background:#25D366;color:white;
+                               border:none;border-radius:8px;font-size:14px;
+                               font-weight:bold;cursor:pointer;">
+                    Save Settings
+                </button>
+            </div>
+        </div>
+        </div>
+        <!-- END SETTINGS TAB -->
+
+        <!-- MINI BOOKINGS IN OVERVIEW -->
+        <div class="card">
+            <h2>Recent Bookings</h2>
+            {% if all_bookings %}
+            <table style="width:100%;border-collapse:collapse;font-size:12px;">
+                <tr>
+                    <th style="padding:6px;background:#f4f4f4;text-align:left;">Name</th>
+                    <th style="padding:6px;background:#f4f4f4;text-align:left;">Date</th>
+                    <th style="padding:6px;background:#f4f4f4;text-align:left;">Time</th>
+                    <th style="padding:6px;background:#f4f4f4;text-align:left;">Status</th>
+                </tr>
+                {% for b in all_bookings|reverse|list %}
+                {% if loop.index <= 3 %}
+                <tr style="border-bottom:1px solid #eee;">
+                    <td style="padding:6px;">{{ b.name }}</td>
+                    <td style="padding:6px;">{{ b.date }}</td>
+                    <td style="padding:6px;">{{ b.time }}</td>
+                    <td style="padding:6px;">
+                        {% if b.status == "Active" %}
+                            <span style="background:#e8f8f0;color:#25D366;
+                                padding:2px 6px;border-radius:8px;
+                                font-weight:bold;font-size:10px;">Active</span>
+                        {% else %}
+                            <span style="background:#fdecea;color:#c0392b;
+                                padding:2px 6px;border-radius:8px;
+                                font-weight:bold;font-size:10px;">Cancelled</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endif %}
+                {% endfor %}
+            </table>
+            <p style="font-size:11px;color:#999;margin-top:8px;text-align:right;">
+                <a href="#" onclick="showTab('bookings')"
+                   style="color:#25D366;text-decoration:none;font-weight:bold;">
+                   View all bookings →
+                </a>
+            </p>
+            {% else %}
+                <p style="color:#999;font-size:13px;">No bookings yet.</p>
+            {% endif %}
+        </div>
+
+        <!-- MINI ANALYTICS IN OVERVIEW -->
+        <div class="card">
+            <h2>Quick Analytics</h2>
+
+            <!-- Conversion Rate Bar -->
+            <div style="margin-bottom:14px;">
+                <div style="display:flex;justify-content:space-between;
+                            font-size:12px;margin-bottom:4px;">
+                    <span style="font-weight:bold;">Booking Conversion Rate</span>
+                    {% if messages > 0 %}
+                    <span style="color:#25D366;font-weight:bold;">
+                        {{ (bookings/messages*100)|round|int }}%
+                    </span>
+                    {% else %}
+                    <span style="color:#999;">No data</span>
+                    {% endif %}
+                </div>
+                <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:14px;">
+                    {% if messages > 0 %}
+                    <div style="background:linear-gradient(90deg,#25D366,#0f3460);
+                                height:100%;
+                                width:{{ [(bookings/messages*100)|round|int, 100]|min }}%;
+                                border-radius:20px;">
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Active vs Cancelled Bar -->
+            {% set active_count = all_bookings|selectattr("status","eq","Active")|list|length %}
+            {% set cancelled_count = all_bookings|selectattr("status","eq","Cancelled")|list|length %}
+            {% set total_count = all_bookings|length %}
+
+            <div style="margin-bottom:14px;">
+                <div style="display:flex;justify-content:space-between;
+                            font-size:12px;margin-bottom:4px;">
+                    <span style="font-weight:bold;color:#25D366;">Active Bookings</span>
+                    <span>{{ active_count }}</span>
+                </div>
+                <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:14px;">
+                    {% if total_count > 0 %}
+                    <div style="background:#25D366;height:100%;
+                                width:{{ (active_count/total_count*100)|round|int }}%;
+                                border-radius:20px;">
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div style="margin-bottom:8px;">
+                <div style="display:flex;justify-content:space-between;
+                            font-size:12px;margin-bottom:4px;">
+                    <span style="font-weight:bold;color:#c0392b;">Cancelled Bookings</span>
+                    <span>{{ cancelled_count }}</span>
+                </div>
+                <div style="background:#f4f4f4;border-radius:20px;overflow:hidden;height:14px;">
+                    {% if total_count > 0 %}
+                    <div style="background:#c0392b;height:100%;
+                                width:{{ (cancelled_count/total_count*100)|round|int }}%;
+                                border-radius:20px;">
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <p style="font-size:11px;color:#999;margin-top:8px;text-align:right;">
+                <a href="#" onclick="showTab('analytics')"
+                   style="color:#25D366;text-decoration:none;font-weight:bold;">
+                   Full analytics →
+                </a>
+            </p>
+        </div>
+
+        <!-- TIMELINE VIEW -->
+        <div class="card">
+            <h2>Booking Timeline</h2>
+            {% if all_bookings %}
+            <div style="position:relative;padding-left:24px;">
+                <!-- Vertical line -->
+                <div style="position:absolute;left:8px;top:0;bottom:0;
+                            width:2px;background:#e0e0e0;"></div>
+                {% for b in all_bookings|reverse %}
+                {% if loop.index <= 5 %}
+                <div style="position:relative;margin-bottom:16px;">
+                    <!-- Dot -->
+                    <div style="position:absolute;left:-20px;top:4px;
+                                width:12px;height:12px;border-radius:50%;
+                                background:{{ '#25D366' if b.status == 'Active' else '#c0392b' }};
+                                border:2px solid white;
+                                box-shadow:0 0 0 2px {{ '#25D366' if b.status == 'Active' else '#c0392b' }};">
+                    </div>
+                    <!-- Content -->
+                    <div style="background:#f9f9f9;border-radius:8px;
+                                padding:10px 12px;border-left:3px solid
+                                {{ '#25D366' if b.status == 'Active' else '#c0392b' }};">
+                        <div style="display:flex;justify-content:space-between;
+                                    align-items:center;">
+                            <b style="font-size:13px;">{{ b.name }}</b>
+                            <span style="font-size:10px;
+                                background:{{ '#e8f8f0' if b.status == 'Active' else '#fdecea' }};
+                                color:{{ '#25D366' if b.status == 'Active' else '#c0392b' }};
+                                padding:2px 6px;border-radius:6px;font-weight:bold;">
+                                {{ b.status }}
+                            </span>
+                        </div>
+                        <div style="font-size:11px;color:#666;margin-top:4px;">
+                            📅 {{ b.date }} &nbsp;|&nbsp; 🕐 {{ b.time }}
+                            &nbsp;|&nbsp; 👥 {{ b.party_size }} people
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+                {% endfor %}
+            </div>
+            {% if all_bookings|length > 5 %}
+            <p style="font-size:11px;color:#999;text-align:right;margin-top:4px;">
+                <a href="#" onclick="showTab('bookings')"
+                   style="color:#25D366;text-decoration:none;font-weight:bold;">
+                   View all {{ all_bookings|length }} bookings →
+                </a>
+            </p>
+            {% endif %}
+            {% else %}
+                <p style="color:#999;font-size:13px;">No bookings yet.</p>
+            {% endif %}
+        </div>
+
+        <!-- PIE CHART — Active vs Cancelled -->
+        <div class="card">
+            <h2>Booking Status</h2>
+            <div style="display:flex;align-items:center;gap:20px;">
+                <div style="width:200px;height:200px;">
+                    <canvas id="statusPieChart"></canvas>
+                </div>
+                <div style="flex:1;">
+                    {% set active_count = all_bookings|selectattr("status","eq","Active")|list|length %}
+                    {% set cancelled_count = all_bookings|selectattr("status","eq","Cancelled")|list|length %}
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+                        <div style="width:12px;height:12px;border-radius:50%;
+                                    background:#25D366;flex-shrink:0;"></div>
+                        <span style="font-size:13px;">Active</span>
+                        <b style="margin-left:auto;color:#25D366;">{{ active_count }}</b>
+                    </div>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                        <div style="width:12px;height:12px;border-radius:50%;
+                                    background:#c0392b;flex-shrink:0;"></div>
+                        <span style="font-size:13px;">Cancelled</span>
+                        <b style="margin-left:auto;color:#c0392b;">{{ cancelled_count }}</b>
+                    </div>
+                    <div style="margin-top:12px;padding-top:12px;border-top:1px solid #eee;">
+                        <span style="font-size:11px;color:#666;">Total Bookings</span>
+                        <b style="float:right;">{{ all_bookings|length }}</b>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RECENT CONVERSATIONS (Overview) -->
+        <div id="section-overview-convos">
         <div class="card">
             <h2>Recent Conversations</h2>
             {% if conversations %}
@@ -658,6 +1392,7 @@ def dashboard():
             {% else %}
                 <p style="color:#999;font-size:13px;">No conversations yet.</p>
             {% endif %}
+        </div>
         </div>
     </body>
     </html>
