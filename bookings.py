@@ -27,6 +27,21 @@ def save_booking(name, phone, date, time, party_size):
     print(f"Booking saved: {name} - {date} at {time}")
     return booking
 
+def update_booking(phone, name, date, time, party_size):
+    """Update existing active booking for this phone number"""
+    bookings = load_all_bookings()
+    for booking in reversed(bookings):
+        if booking["phone"] == phone and booking["status"] == "Active":
+            booking["name"] = name
+            booking["date"] = date
+            booking["time"] = time
+            booking["party_size"] = party_size
+            booking["updated_at"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+            break
+    with open(BOOKINGS_FILE, "w") as f:
+        json.dump(bookings, f, indent=2, ensure_ascii=False)
+    print(f"Booking updated for {phone}")
+
 def cancel_booking(phone):
     """Cancel most recent active booking for this phone number"""
     bookings = load_all_bookings()
@@ -47,6 +62,15 @@ def load_all_bookings():
 
 def get_todays_bookings():
     """Get only today's bookings"""
-    today = datetime.now().strftime("%d/%m/%Y")
+    today = datetime.now()
+    today_str = today.strftime("%d %b %y")
     all_bookings = load_all_bookings()
-    return [b for b in all_bookings if today in str(b.get("date", ""))]
+    todays = []
+    for b in all_bookings:
+        if today_str.lower() in str(b.get("date", "")).lower():
+            todays.append(b)
+    return todays
+
+def count_todays_bookings():
+    """Count today's bookings"""
+    return len(get_todays_bookings())
